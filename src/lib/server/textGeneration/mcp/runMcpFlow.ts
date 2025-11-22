@@ -18,7 +18,7 @@ import { executeToolCalls, type NormalizedToolCall } from "./toolInvocation";
 import { drainPool } from "$lib/server/mcp/clientPool";
 import type { TextGenerationContext } from "../types";
 import { hasAuthHeader, isStrictHfMcpLogin, hasNonEmptyToken } from "$lib/server/mcp/hf";
-import { buildImageRefResolver } from "./fileRefs";
+import { buildImageRefResolver, buildFileRefListing } from "./fileRefs";
 import { prepareMessagesWithFiles } from "$lib/server/textGeneration/utils/prepareFiles";
 import { makeImageProcessor } from "$lib/server/endpoints/images";
 
@@ -287,6 +287,12 @@ export async function* runMcpFlow({
 		const prepromptPieces: string[] = [];
 		if (toolPreprompt.trim().length > 0) {
 			prepromptPieces.push(toolPreprompt);
+		}
+		// Add file listing to context if there are uploaded files
+		const baseUrl = config.PUBLIC_ORIGIN || "";
+		const fileListing = buildFileRefListing(messages, baseUrl, conv._id.toString());
+		if (fileListing) {
+			prepromptPieces.push(fileListing);
 		}
 		if (typeof preprompt === "string" && preprompt.trim().length > 0) {
 			prepromptPieces.push(preprompt);

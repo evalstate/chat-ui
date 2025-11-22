@@ -76,6 +76,49 @@ export function buildImageRefResolver(messages: EndpointMessage[]): FileRefResol
 	return buildFileRefResolver(messages, [IMAGE_REF_KIND]);
 }
 
+/**
+ * Build a text listing of all files available in the conversation for inclusion in prompts.
+ * Returns a string like:
+ *   You have access to the following files:
+ *   image_1 - image/png - https://example.com/conversation/abc/output/def123
+ */
+export function buildFileRefListing(
+	messages: EndpointMessage[],
+	baseUrl: string,
+	convId: string,
+	refKinds: RefKind[] = DEFAULT_REF_KINDS
+): string | undefined {
+	if (!Array.isArray(refKinds) || refKinds.length === 0) return undefined;
+
+	// Collect files with their hashes by ref kind, preserving conversation order
+	const buckets = new Map<RefKind, Array<{ name: string; mime: string; hash: string }>>();
+	for (const msg of messages) {
+		if (msg.from !== "user") continue;
+		for (const file of msg.files ?? []) {
+			// Only include files stored as hashes (not inline base64)
+			if (file.type !== "hash") continue;
+			const mime = file?.mime ?? "";
+			const kind = refKinds.find((k) => k.matches(mime));
+			if (!kind) continue;
+			const arr = buckets.get(kind) ?? [];
+			arr.push({ name: file.name, mime, hash: file.value });
+			buckets.set(kind, arr);
+		}
+	}
+
+	if (buckets.size === 0) return undefined;
+
+	// Generate the listing
+	const lines = ["You have access to the following files:"];
+	for (const [kind, files] of buckets) {
+		files.forEach((f, i) => {
+			const url = `${baseUrl}/conversation/${convId}/output/${f.hash}`;
+			lines.push(`${kind.prefix}_${i + 1} - ${f.mime} - ${url}`);
+		});
+	}
+	return lines.join("\n");
+}
+
 type FieldRule = {
 	keys: string[];
 	action: "attachPayload" | "replaceWithDataUrl";
