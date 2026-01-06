@@ -214,6 +214,169 @@ function sanitizeHref(href?: string | null): string | undefined {
 	return trimmed.replace(/>$/, "");
 }
 
+// Video and audio URL detection
+const VIDEO_EXTENSIONS = [".mp4", ".webm", ".ogg", ".mov", ".m4v"];
+const AUDIO_EXTENSIONS = [".mp3", ".wav", ".m4a", ".aac", ".flac"];
+
+function isVideoUrl(url: string): boolean {
+	const lower = url.toLowerCase().split("?")[0].split("#")[0];
+	return VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+function isAudioUrl(url: string): boolean {
+	const lower = url.toLowerCase().split("?")[0].split("#")[0];
+	return AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// Sanitize video/audio HTML tags, returning escaped HTML if invalid
+function sanitizeMediaHtml(html: string): string {
+	const trimmed = html.trim();
+
+	// Check if this is a video or audio tag
+	const mediaMatch = trimmed.match(/^<(video|audio)([\s\S]*?)>([\s\S]*?)<\/\1>$/i);
+	if (!mediaMatch) {
+		// Check for self-closing video/audio (less common but valid)
+		const selfClosingMatch = trimmed.match(/^<(video|audio)([\s\S]*?)\/?>/i);
+		if (!selfClosingMatch) {
+			return escapeHTML(html);
+		}
+		// Handle self-closing tag
+		const [, tagName, attrs] = selfClosingMatch;
+		const sanitizedAttrs = sanitizeMediaAttributes(attrs);
+		return `<${tagName}${sanitizedAttrs}></${tagName}>`;
+	}
+
+	const [, tagName, attrs, content] = mediaMatch;
+
+	// Sanitize the attributes
+	const sanitizedAttrs = sanitizeMediaAttributes(attrs);
+
+	// Sanitize the content (should only contain <source> tags and whitespace)
+	const sanitizedContent = sanitizeMediaContent(content);
+
+	return `<${tagName}${sanitizedAttrs}>${sanitizedContent}</${tagName}>`;
+}
+
+// Allowed attributes for video/audio tags
+const ALLOWED_MEDIA_ATTRS = [
+	"controls",
+	"autoplay",
+	"loop",
+	"muted",
+	"preload",
+	"poster",
+	"width",
+	"height",
+	"class",
+	"id",
+	"style",
+	"playsinline",
+];
+
+function sanitizeMediaAttributes(attrs: string): string {
+	const result: string[] = [];
+
+	// Match attribute patterns: name="value", name='value', name=value, or just name
+	const attrPattern = /(\w+)(?:=(?:"([^"]*)"|'([^']*)'|(\S+)))?/g;
+	let match;
+
+	while ((match = attrPattern.exec(attrs)) !== null) {
+		const [, name, doubleQuoted, singleQuoted, unquoted] = match;
+		const lowerName = name.toLowerCase();
+
+		if (ALLOWED_MEDIA_ATTRS.includes(lowerName)) {
+			const value = doubleQuoted ?? singleQuoted ?? unquoted;
+			if (value !== undefined) {
+				// Sanitize the value
+				if (lowerName === "poster") {
+					const safeSrc = sanitizeHref(value);
+					if (safeSrc) {
+						result.push(`${lowerName}="${escapeHTML(safeSrc)}"`);
+					}
+				} else if (lowerName === "style") {
+					// Only allow safe CSS properties
+					const safeStyle = sanitizeStyle(value);
+					if (safeStyle) {
+						result.push(`${lowerName}="${escapeHTML(safeStyle)}"`);
+					}
+				} else {
+					result.push(`${lowerName}="${escapeHTML(value)}"`);
+				}
+			} else {
+				// Boolean attribute
+				result.push(lowerName);
+			}
+		}
+	}
+
+	return result.length > 0 ? " " + result.join(" ") : "";
+}
+
+function sanitizeStyle(style: string): string {
+	// Only allow safe CSS properties for media elements
+	const allowedProps = ["width", "height", "max-width", "max-height", "aspect-ratio"];
+	const parts = style.split(";").filter(Boolean);
+	const safe: string[] = [];
+
+	for (const part of parts) {
+		const [prop, ...valueParts] = part.split(":");
+		if (prop && valueParts.length > 0) {
+			const propName = prop.trim().toLowerCase();
+			const value = valueParts.join(":").trim();
+			if (
+				allowedProps.includes(propName) &&
+				!value.includes("expression") &&
+				!value.includes("url(")
+			) {
+				safe.push(`${propName}: ${value}`);
+			}
+		}
+	}
+
+	return safe.join("; ");
+}
+
+function sanitizeMediaContent(content: string): string {
+	// Parse and sanitize <source> tags
+	const result: string[] = [];
+	const sourcePattern = /<source([\s\S]*?)\/?>/gi;
+	let match;
+
+	while ((match = sourcePattern.exec(content)) !== null) {
+		const [, attrs] = match;
+		const sanitizedSource = sanitizeSourceTag(attrs);
+		if (sanitizedSource) {
+			result.push(sanitizedSource);
+		}
+	}
+
+	return result.join("\n");
+}
+
+function sanitizeSourceTag(attrs: string): string | null {
+	const srcMatch = attrs.match(/src=(?:"([^"]*)"|'([^']*)'|(\S+))/i);
+	const typeMatch = attrs.match(/type=(?:"([^"]*)"|'([^']*)'|(\S+))/i);
+
+	if (!srcMatch) return null;
+
+	const src = srcMatch[1] ?? srcMatch[2] ?? srcMatch[3];
+	const safeSrc = sanitizeHref(src);
+	if (!safeSrc) return null;
+
+	let result = `<source src="${escapeHTML(safeSrc)}"`;
+
+	if (typeMatch) {
+		const type = typeMatch[1] ?? typeMatch[2] ?? typeMatch[3];
+		// Only allow valid media types
+		if (/^(video|audio)\/[\w+-]+$/.test(type)) {
+			result += ` type="${escapeHTML(type)}"`;
+		}
+	}
+
+	result += ">";
+	return result;
+}
+
 function highlightCode(text: string, lang?: string): string {
 	if (lang && hljs.getLanguage(lang)) {
 		try {
@@ -238,7 +401,27 @@ function createMarkedInstance(sources: SimpleSource[]): Marked {
 					? `<a href="${escapeHTML(safeHref)}" target="_blank" rel="noreferrer">${text}</a>`
 					: `<span>${escapeHTML(text ?? "")}</span>`;
 			},
-			html: (html) => escapeHTML(html),
+			image: (href, title, text) => {
+				const safeHref = sanitizeHref(href);
+				if (!safeHref) {
+					return `<span>${escapeHTML(text ?? "")}</span>`;
+				}
+
+				// Check if the URL points to a video file
+				if (isVideoUrl(safeHref)) {
+					return `<video controls><source src="${escapeHTML(safeHref)}"></video>`;
+				}
+
+				// Check if the URL points to an audio file
+				if (isAudioUrl(safeHref)) {
+					return `<audio controls><source src="${escapeHTML(safeHref)}"></audio>`;
+				}
+
+				// Regular image
+				const titleAttr = title ? ` title="${escapeHTML(title)}"` : "";
+				return `<img src="${escapeHTML(safeHref)}" alt="${escapeHTML(text ?? "")}"${titleAttr}>`;
+			},
+			html: (html) => sanitizeMediaHtml(html),
 		},
 		gfm: true,
 		breaks: true,
